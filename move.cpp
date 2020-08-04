@@ -10,7 +10,7 @@ class A {
 		A(const A& a) {
 			cout << "Copied" << endl;
 		}
-		// A(A&& a) = delete;
+		// A(A&& a ) = delete; 
 };
 
 void CallCopy(A a) {}
