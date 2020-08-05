@@ -5,7 +5,7 @@ class Base {
       Base() = default;		
       Base(int i) {}		
 	  void print() {
-	    std::cout << "Baseeee" << std::endl;
+	    std::cout << "Baseee" << std::endl;
 	  }
 	private:
 	  int j;  
