@@ -1,134 +1,152 @@
+// This piece of code implements the producer/consumer problems.
+// It uses the semaphore to sync the producer and consumer
+// processes. It uses shared memory for inter-process data
+// communication.
+// This is a 1 producer, multiple consumers impl.
+
 #include <unistd.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <sys/wait.h>
 #include <string.h>
 #include <sys/types.h>
+#include <sys/shm.h>
 #include <sys/sem.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/ipc.h>
 
-typedef union semunion {
+#define FULL_SEM 0        // Index of the Full semaphore
+#define EMPTY_SEM  1      // Index of the Empty semaphore
+#define CONSUMER_PTR 2
+#define BUFFER_SIZE 128   // Size of the queue
+
+#define SET_SEM_VAL(sem)                              \
+    if (semctl(semid, sem, SETVAL, arg) < 0) {   \
+      perror("semget fail!\n");                       \
+      exit(1);                                        \
+    }                                                 \
+
+union semunion {
   int val;
   struct semid_ds *buf;
   unsigned short *array;
-} semun;
-
-typedef semun semunion;
+};
 
 int sem_init(int key)
 {
   int semid;
   semunion arg;
 
-  printf("key is %d\n", key);
-  semid = semget(key, 1, 0660 | IPC_CREAT); //创建一个信号量集，且只有一个信号量，控制的资源key
-  if (semid < 0)
-  {
-    perror("semget fail!\n");
+  semid = semget(key, 3, 0660 | IPC_CREAT);
+  if (semid < 0) {
+    perror("Failed to create semaphore.");
     exit(1);
   }
 
-  arg.val = 2;
-  if (semctl(semid, 0, SETVAL, arg) < 0) //设置信号量的参数val
-  {
-    perror("semget fail!\n");
-    exit(2);
-  }
+  arg.val = 0;
+  SET_SEM_VAL(FULL_SEM);
+
+  arg.val = BUFFER_SIZE;
+  SET_SEM_VAL(EMPTY_SEM);
+
+  arg.val = 1;
+  SET_SEM_VAL(CONSUMER_PTR);
 
   return semid;
 }
 
 
-int sem_pos(int semid)
+int sem_wait(int semid, int sub)
 {
   struct sembuf buf;
-  buf.sem_num = 0;
-  buf.sem_op = -1; //请求-1的绝对值个资源，
+  buf.sem_num = sub;     // the index of the semaphore in the set
+  buf.sem_op = -1;       // to decrement value by 1
   buf.sem_flg = SEM_UNDO;
 
-  if (semop(semid, &buf, 1) == -1)
-  {
-    perror("sem_op \n");
+  if (semop(semid, &buf, 1) == -1) {
+    perror("Failed to decrement.\n");
     exit(3);
   }
-  printf("sem_poss success!\n");
 
   return 0;
 }
 
-int sem_rel(int semid)
+int sem_signal(int semid, int sub)
 {
   struct sembuf buf;
-  buf.sem_num = 0; //这个就是信号量集中的信号量元素下标
-  buf.sem_op = 1; //释放1 个资源，
+  buf.sem_num = sub;
+  buf.sem_op = 1;
   buf.sem_flg = IPC_NOWAIT;
 
-  if (semop(semid, &buf, 1) == -1)
-  {
-    perror("sem_op \n");
+  if (semop(semid, &buf, 1) == -1) {
+    perror("Failed to increment.\n");
     exit(3);
   }
-  printf("sem_rel success!\n");
 
   return 0;
 }
 
-int sem_rmv(int semid)
-{
+void producer(int semid, int* buffer) {
+  int i = 0;
 
-  if (semctl(semid, 0, IPC_RMID) < 0)
-  {
-    perror("semctl\n");
-    exit(3);
+  while (true) {
+    sem_wait(semid, EMPTY_SEM);
+
+    buffer[i] =  i;
+    printf("Parent: producing int :%i\n", buffer[i]);
+
+    i = (i + 1) % BUFFER_SIZE;
+
+    sem_signal(semid, FULL_SEM);
   }
-  return 0;
+}
+
+void spawn_consumer(int semid, key_t key) {
+  // Create child process.  
+  int pid;
+  while ((pid = fork()) == -1);
+  if (pid != 0) {
+    return;
+  }
+
+  // Create shared memory
+  int shmid = shmget(key, 1024, 0666 | IPC_CREAT);
+  int *buffer = (int*) shmat(shmid, (void*)0, 0);
+
+  while (true) {
+    sem_wait(semid, FULL_SEM);
+    // mutex for the consumer ptr, namely buffer[BUFFER_SIZE]
+    sem_wait(semid, CONSUMER_PTR);   
+    int i = buffer[BUFFER_SIZE];
+    printf("Child %i: consuming int :%i\n", getpid(), buffer[i]);
+    buffer[BUFFER_SIZE] = (i + 1) % BUFFER_SIZE;
+    sem_signal(semid, CONSUMER_PTR);
+    sem_signal(semid, EMPTY_SEM);
+  }
 }
 
 
 int main(void)
 {
-
-  //获得关键字，这就是信号量实际控制的资源
   key_t key = ftok("./test.txt", 5);
+
+  // Create semaphore
   int semid = sem_init(key);
 
-  if (semid < 0)
-  {
-    perror("semget fail!\n");
-    exit(1);
+  // Create shared memory
+  // The first BUFFER_SIZE elements in the buffer will be the actual data.
+  // The (BUFFER_SIZE + 1)th element will be the index of the "next"
+  // available element to consumer.
+  int shmid = shmget(key, 1024, 0666 | IPC_CREAT);
+  int* buffer = (int*) shmat(shmid, (void*)0, 0);
+  // Set the "current" index for the consumer.
+  buffer[BUFFER_SIZE] = 0;
+
+  for (int i = 0; i < 5; i++) {
+    spawn_consumer(semid, key);
   }
 
-  int pid, n;
-  char str[80];
-
-  // 读写方式，如果文件不存在则新建，打开之后指针定位在文件尾部
-  int fd = open("./test.txt", O_RDWR | O_CREAT | O_TRUNC, 0644);
-  while ((pid = fork()) == -1); //创建子进程
-  if (pid == 0) //child process
-  {
-    sleep(1); //睡眠1s
-    sem_pos(semid);
-    lseek(fd, SEEK_SET, 0); //定位文件
-    read(fd, str, sizeof(str)); //读文件
-    sem_rel(semid); //释放操作
-    printf("child:read str from test file:%s\n", str);
-    exit(0);
-  }
-  else //parent process
-  {
-    sem_pos(semid); //     P操作
-    printf("parent:please enter a str for test file(strlen<80):\n");
-    gets(str);        //输入
-    n = strlen(str); // 长度
-    lseek(fd, SEEK_SET, 0);   //定位
-    write(fd, str, n);      //写
-    sem_rel(semid); //释放
-    wait(0);
-    close(fd); //关闭文件
-    sem_rmv(semid); //删除信号量
-    exit(0);
-  }
+  producer(semid, buffer);
   return (0);
 }
