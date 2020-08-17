@@ -3,6 +3,8 @@
 // processes. It uses shared memory for inter-process data
 // communication.
 // This is a 1 producer, multiple consumers impl.
+// This is inspired by http://blog.chinaunix.net/uid-23193900-id-3194924.html
+// and https://www.geeksforgeeks.org/ipc-shared-memory/
 
 #include <unistd.h>
 #include <sys/stat.h>
